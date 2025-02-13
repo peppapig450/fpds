@@ -12,7 +12,6 @@ from xml.etree.ElementTree import Element, ElementTree, fromstring
 from fpds.core import FPDS_ENTRY
 from fpds.core.mixins import fpdsMixin, fpdsXMLMixin
 
-NAMESPACE_REGEX = r"\{(.*)\}"
 LAST_PAGE_REGEX = r"start=(.*?)$"
 
 
@@ -166,17 +165,7 @@ class fpdsElement(fpdsXML):
     def parse_items(self) -> Iterator[Element]:
         """Returns iteration of `Element` as a generator."""
         yield from self.element.iter()
-
-    @property
-    def NAMESPACE_REGEX_PATTERN(self) -> str:
-        """A single regex pattern string that allows us to remove all
-        namespaces from tags, irrespective of namespace value.
-        """
-        namespaces = "|".join(self.namespace_dict.values())
-        # yeah, f-strings don't do well with backslashes
-        PATTERN = r"\{(" + namespaces + r")\}"  # noqa
-        return PATTERN
-
+        
     @property
     def tag(self):
         """Raw tag from `xml` library."""
@@ -188,9 +177,8 @@ class fpdsElement(fpdsXML):
         `ns1:productOrServiceInformation` would simply return
         `productOrServiceInformation`.
         """
-        clean_tag = re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
+        clean_tag = self.compiled_namespace_regex.sub("", self.tag)
         return clean_tag
-
 
 class _ElementAttributes(fpdsElement, fpdsXMLMixin):
     """
@@ -296,8 +284,9 @@ class Entry(fpdsElement):
         content = self.element.find(".//ns0:content", self.namespace_dict)
         if content:
             award = list(content)[0]
-            award_type = re.sub(self.NAMESPACE_REGEX_PATTERN, "", award.tag)
-        return award_type.upper()
+            award_type = self.compiled_namespace_regex.sub("", award.tag)
+            return award_type
+        return ""
 
     def get_entry_data(self) -> Dict[str, str]:
         """Extracts award data from an entry."""
@@ -312,6 +301,8 @@ class Entry(fpdsElement):
             entry_tags["contract_type"] = self.contract_type
         return entry_tags
 
+        
+        
     def content_tag_hierarchy(
         self,
         element: Optional[Element] = None,
@@ -392,6 +383,7 @@ class Parent(fpdsElement):
         super().__init__(*args, **kwargs)
         self.parent_name = parent_name
 
+    # TODO: i think this list cast can go too.
     def children(self):
         """Returns children if they exist."""
         if list(self.element):
