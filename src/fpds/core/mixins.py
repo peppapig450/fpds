@@ -5,6 +5,8 @@ author: derek663@gmail.com
 last_updated: 06/05/2024
 """
 
+import re
+from functools import cached_property
 from xml.etree.ElementTree import Element, ElementTree
 
 
@@ -28,9 +30,21 @@ class fpdsXMLMixin:
         with_modules = [cls.__module__ + f".{cls.__qualname__}" for cls in classes]
         return with_modules
 
+    @cached_property
+    def compiled_namespace_regex(self) -> re.Pattern:
+        """
+        Returns a compiled regex that matches any of the namespaces
+        in the namespace dictionary. This is cached so it only compiles once.
+        """
+        # Escape each namespace value for safety
+        namespaces = "".join(re.escape(ns) for ns in self.namespace_dict.values()) # type: ignore
+        pattern_str = r"\{(" + namespaces + r")\}"
+        return re.compile(pattern_str)
+    
     @property
     def NAMESPACE_REGEX_PATTERN(self) -> str:
-        namespaces = "|".join(self.namespace_dict.values())  # type: ignore
-        # yeah, f-strings don't do well with backslashes
-        PATTERN = r"\{(" + namespaces + r")\}"  # noqa
-        return PATTERN
+        """
+        Returns the regex pattern string. For actual matching operations,
+        consider using the compiled regex (self.compiled_namespace_regex).
+        """
+        return self.compiled_namespace_regex.pattern
