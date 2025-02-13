@@ -142,16 +142,19 @@ class fpdsRequest(fpdsMixin):
             xml = fpdsXML(content=self.convert_to_lxml_tree(content))
             return xml
 
+    async def _fetch_with_semaphore(self, session: ClientSession, link: str, sem: Semaphore) -> fpdsXML:
+        async with sem:
+            return await self.convert(session, link)
+        
+        
     async def fetch(self) -> List[fpdsXML]:
-        semaphore = Semaphore(self.thread_count)
-
         if not self.links:
             return []
-
-        async with semaphore:
-            async with ClientSession() as session:
-                tasks = [self.convert(session, link) for link in self.links]
-                return await asyncio.gather(*tasks)
+        
+        sem = Semaphore(self.thread_count)
+        async with ClientSession() as session:
+            tasks = [self._fetch_with_semaphore(session, link, sem) for link in self.links]
+            return await asyncio.gather(*tasks)
 
     def page_index(self) -> Optional[int]:
         """Converts `page` to index integer."""
