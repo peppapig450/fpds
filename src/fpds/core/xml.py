@@ -83,8 +83,11 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         element: `Element`
             An lxml Element type.
         """
-        if element.tag.startswith("{"):
-            return element.tag[1:].split("}")[0]
+        tag = element.tag
+        if tag.startswith("{"):
+            end = tag.find("}")
+            if end != -1:
+                return tag[1:end]
         return ""
 
     @property
