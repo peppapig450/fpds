@@ -36,9 +36,9 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         if isinstance(content, bytes):
             self.content = content
             self.tree = self.convert_to_lxml_tree()
-        elif isinstance(content, self.xml_child_classes):
+        if isinstance(content, self.xml_child_classes):
             self.tree = content
-        else:
+        if not isinstance(content, self.xml_child_classes + (bytes,)):
             module_names = ",".join(
                 [f"`{mod}`" for mod in self.xml_child_classes_with_modules]
             )
@@ -83,12 +83,8 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         element: `Element`
             An lxml Element type.
         """
-        tag = element.tag
-        if tag.startswith("{"):
-            end = tag.find("}")
-            if end != -1:
-                return tag[1:end]
-        return ""
+        namespace = re.match(NAMESPACE_REGEX, element.tag)
+        return namespace.group(1) if namespace else ""
 
     @property
     def response_size(self) -> int:
@@ -103,14 +99,14 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
 
         https://docs.python.org/3/library/xml.etree.elementtree.html#parsing-xml-with-namespaces
         """
-        if not hasattr(self, "_namespace_dict"):
-            namespaces = []
-            for element in self.parse_items():
-                ns = self._get_full_namespace(element)
-                if ns and ns not in namespaces:
-                    namespaces.append(ns)
-            self._namespace_dict = {f"ns{idx}": ns for idx, ns in enumerate(namespaces)}
-        return self._namespace_dict
+        namespaces = list()
+        for element in self.parse_items():
+            _namespace = self._get_full_namespace(element)
+            if _namespace not in namespaces:
+                namespaces.append(_namespace)
+
+        namespace_dict = {f"ns{idx}": ns for idx, ns in enumerate(namespaces)}
+        return namespace_dict
 
     @property
     def lower_limit(self) -> int:
@@ -192,8 +188,8 @@ class fpdsElement(fpdsXML):
         `ns1:productOrServiceInformation` would simply return
         `productOrServiceInformation`.
         """
-        # Use cached, compiled regex
-        return self.compiled_namespace_regex.sub("", self.tag)
+        clean_tag = re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
+        return clean_tag
 
 
 class _ElementAttributes(fpdsElement, fpdsXMLMixin):
@@ -300,9 +296,8 @@ class Entry(fpdsElement):
         content = self.element.find(".//ns0:content", self.namespace_dict)
         if content:
             award = list(content)[0]
-            award_type = self.compiled_namespace_regex.sub("", award.tag)
-            return award_type.upper()
-        return ""
+            award_type = re.sub(self.NAMESPACE_REGEX_PATTERN, "", award.tag)
+        return award_type.upper()
 
     def get_entry_data(self) -> Dict[str, str]:
         """Extracts award data from an entry."""
@@ -399,8 +394,12 @@ class Parent(fpdsElement):
 
     def children(self):
         """Returns children if they exist."""
-        children = list(self.element)
-        return children if children else None
+        if list(self.element):
+            return list(self.element)
 
     def parent_child_hierarchy_name(self, delim="__"):
-        return f"{self.parent_name}{delim}{self.clean_tag}" if self.parent_name else self.clean_tag
+        if self.parent_name:
+            name = self.parent_name + delim + self.clean_tag
+        else:
+            name = self.clean_tag
+        return name
