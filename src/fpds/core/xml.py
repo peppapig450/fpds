@@ -128,12 +128,11 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         """
         resp_size = self.response_size
         offset = 0 if self.lower_limit < 10 else resp_size
-        page_range = list(range(0, self.lower_limit + offset, resp_size))
-        page_links = []
-        for num in page_range:
-            link = f"{self.url_base}&q={params}&start={num}"
-            page_links.append(link)
-        return page_links
+
+        return [
+            f"{self.url_base}&q={params}&start={num}"
+            for num in range(0, self.lower_limit + offset, resp_size)
+        ]
 
     def get_atom_feed_entries(self) -> List[Element]:
         """Returns tree entries that contain FPDS record data."""
