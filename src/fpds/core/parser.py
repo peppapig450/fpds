@@ -9,7 +9,7 @@ import asyncio
 import multiprocessing
 from asyncio import Semaphore
 from concurrent.futures import ProcessPoolExecutor
-from typing import Iterator, List, Optional, Union
+from typing import List, Optional, Union
 from urllib import parse
 from urllib.request import urlopen
 from xml.etree.ElementTree import ElementTree, fromstring
@@ -22,6 +22,17 @@ from fpds.core.xml import fpdsXML
 from fpds.errors import fpdsMaxPageLengthExceededError, fpdsMissingKeywordParameterError
 from fpds.utilities import validate_kwarg
 
+def process_pages(pages: list[fpdsXML]) -> list[FPDS_ENTRY]:
+    """
+    Helper function for parallel processing.
+    
+    Given a list of fpdsXML pages, converts each page to a list of FPDS_ENTRYs
+    using the fpdsRequest._jsonify static method and returns a single flattened list.
+    """
+    result: list[FPDS_ENTRY] = []
+    for page in pages:
+        result.extend(fpdsRequest._jsonify(page))
+    return result
 
 class fpdsRequest(fpdsMixin):
     """Makes a GET request to the FPDS ATOM feed. Takes an unlimited number of
@@ -77,14 +88,17 @@ class fpdsRequest(fpdsMixin):
         self.cli_run = cli_run
         self.thread_count = thread_count
         self.page = page
-        self.links = []  # type: List[str]
+        self.links: list[str] = []
 
         if kwargs:
             self.kwargs = kwargs
         else:
             raise fpdsMissingKeywordParameterError
 
-        tree = fpdsXML(content=self.initial_request())
+        # Perform the initial request (synchronously) to obtain pagination links.
+        # We pass raw bytes so that fpdsXML handles the conversion.
+        initial_content = self.initial_request()
+        tree = fpdsXML(content=initial_content)
         links = tree.pagination_links(params=self.search_params)
         self.links = links
 
@@ -126,51 +140,72 @@ class fpdsRequest(fpdsMixin):
         tree = ElementTree(fromstring(content))
         return tree
 
-    def initial_request(self) -> ElementTree:
-        """Send initial request to FPDS Atom feed and returns first page."""
+    def initial_request(self) -> bytes:
+        """
+        Sends the initial (synchronous) request to the FPDS ATOM feed
+        and returns the raw response bytes.
+        """
         encoded_params = parse.urlencode({"q": self.search_params})
-        with urlopen(f"{self.url_base}&{encoded_params}") as response:
-            body = response.read()
-
-        content_tree = self.convert_to_lxml_tree(body.decode("utf-8"))
-        return content_tree
+        url = f"{self.url_base}&{encoded_params}"
+        with urlopen(url) as response:
+            return response.read()
 
     async def convert(self, session: ClientSession, link: str) -> fpdsXML:
-        """Retrieves content from FPDS ATOM feed."""
+        """
+        Retrieves and converts content from a FPDS ATOM feed link into an fpdsXML object.
+        """
         async with session.get(link) as response:
             content = await response.read()
-            xml = fpdsXML(content=self.convert_to_lxml_tree(content))
-            return xml
+            return fpdsXML(content=content)
+
+    async def _fetch_with_semaphore(
+        self, session: ClientSession, link: str, semaphore: Semaphore
+    ) -> fpdsXML:
+        async with semaphore:
+            return await self.convert(session, link)
 
     async def fetch(self) -> List[fpdsXML]:
-        semaphore = Semaphore(self.thread_count)
-
+        """
+        Asynchronously retrieves FPDS XML pages using a shared semaphore to limit
+        concurrency.
+        """
         if not self.links:
             return []
-
-        async with semaphore:
-            async with ClientSession() as session:
-                tasks = [self.convert(session, link) for link in self.links]
-                return await asyncio.gather(*tasks)
+        semaphore = Semaphore(self.thread_count)
+        async with ClientSession() as session:
+            tasks = [
+                self._fetch_with_semaphore(session, link, semaphore)
+                for link in self.links
+            ]
+            return await asyncio.gather(*tasks)
 
     def page_index(self) -> Optional[int]:
-        """Converts `page` to index integer."""
-        idx = None
+        """
+        Converts the requested page (if any) to a zero-based index.
+        """
         if self.page:
-            idx = 0 if self.page == 1 else self.page - 1
-        return idx
+            return 0 if self.page == 1 else self.page - 1
+        return None
 
     @staticmethod
-    def _jsonify(entry) -> List[FPDS_ENTRY]:
-        """Wrapper around `jsonify` method for avoiding pickle issue."""
-        return entry.jsonify()
+    def _jsonify(page: fpdsXML) -> List[FPDS_ENTRY]:
+        """
+        Converts a single fpdsXML page into a list of FPDS_ENTRY dictionaries.
+        """
+        return page.jsonify()
 
-    async def data(self) -> Iterator:
-        """Returns FPDS data."""
+    async def data(self) -> List[FPDS_ENTRY]:
+        """
+        Retrieves FPDS data by fetching all pages and converting each to a
+        nested JSON-like dictionary. The conversion is offloaded to a process pool.
+        """
+        pages = await self.fetch()
         num_processes = multiprocessing.cpu_count()
-        data = await self.fetch()
-
-        # for parallel processing
+        loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=num_processes) as pool:
-            results = pool.map(self._jsonify, data)
+            # Offload the mapping to the process pool (blocking call wrapped in run_in_executor)
+            results: List[FPDS_ENTRY] = await loop.run_in_executor(
+                pool, process_pages, pages
+            )
+        # Flatten the list of lists into a single list of entries.
         return results
