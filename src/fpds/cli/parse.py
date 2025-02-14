@@ -9,7 +9,6 @@ last_updated: 12/30/2022
 import asyncio
 import json
 from pathlib import Path
-from uuid import uuid4
 
 import click
 from click import UsageError
@@ -74,9 +73,22 @@ def parse(params, output):
 
     # Retrieve the FPDS data asynchronously.
     records = asyncio.run(request.data())
+    
+        # Create filename based on parameters.
+    filename = ""
+    for key, value in params_kwargs.items():
+        # Sanitize filename by removing special characters and spaces.
+        safe_value = "".join(c for c in value if c.isalnum() or c in "._-[]")
+        filename += f"{key}-{safe_value}_"  # Add underscore separator
 
+    filename = filename[:-1]  # Remove trailing underscore
+    if len(filename) > 200: # Limit filename length to avoid issues.
+        filename = filename[:200] + "_truncated"
+    filename += ".json"
+
+    data_file = output_path / filename
+    
     # Write the JSON output to file.
-    data_file = output_path / f"{uuid4()}.json"
     with open(data_file, "w", encoding="utf-8") as outfile:
         json.dump(records, outfile, ensure_ascii=False, indent=2)
 
