@@ -8,7 +8,6 @@ last_updated: 12/30/2022
 
 import asyncio
 import json
-from itertools import chain
 from pathlib import Path
 from uuid import uuid4
 
@@ -47,33 +46,38 @@ def parse(params, output):
             fpds parse "LAST_MOD_DATE=[2022/01/01, 2022/05/01]" "AGENCY_CODE=7504"
     """
 
+    # Determine output directory: either user-supplied or the default directory.
     if output:
-        OUTPUT_PATH = Path(output)
-        if not OUTPUT_PATH.exists():
-            click.echo(f"Creating output directory {str(OUTPUT_PATH.resolve())}")
-            OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+        output_path = Path(output)
+        if not output_path.exists():
+            click.echo(f"Creating output directory {output_path.resolve()}")
+            output_path.mkdir(parents=True, exist_ok=True)
+    else:
+        output_path = FPDS_DATA_DATE_DIR
 
-    params = [param.split("=") for param in params]
-
+    # Parse positional parameters into a dictionary.
     if not params:
-        raise UsageError("Please provide at least one parameter")
+        raise UsageError("Please provide at least one parameter.")
 
-    for _param in params:  # _param is a tuple
-        name, value = _param
-        _param[1] = validate_kwarg(kwarg=name, string=value)
-
-    params_kwargs = dict(params)
+    params_list = [param.split("=", 1) for param in params]
+    for param in params_list:
+        if len(param) != 2:
+            raise UsageError(f"Parameter '{param}' is not in the format KEY=VALUE")
+        name, value = param
+        param[1] = validate_kwarg(kwarg=name, string=value)
+    params_kwargs = dict(params_list)
     click.echo(f"Params to be used for FPDS search: {params_kwargs}")
 
+    # Instantiate the request (with cli_run=True to skip extra validations).
     request = fpdsRequest(**params_kwargs, cli_run=True)
     click.echo("Retrieving FPDS records from ATOM feed...")
 
-    data = asyncio.run(request.data())
-    records = list(chain.from_iterable(data))
+    # Retrieve the FPDS data asynchronously.
+    records = asyncio.run(request.data())
 
-    DATA_DIR = OUTPUT_PATH if output else FPDS_DATA_DATE_DIR
-    DATA_FILE = DATA_DIR / f"{uuid4()}.json"
-    with open(DATA_FILE, "w") as outfile:
-        json.dump(records, outfile)
+    # Write the JSON output to file.
+    data_file = output_path / f"{uuid4()}.json"
+    with open(data_file, "w", encoding="utf-8") as outfile:
+        json.dump(records, outfile, ensure_ascii=False, indent=2)
 
-    click.echo(f"{len(records)} records have been saved as JSON at: {DATA_FILE}")
+    click.echo(f"{len(records)} records have been saved as JSON at: {data_file}")
