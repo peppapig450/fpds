@@ -184,65 +184,6 @@ class fpdsElement(fpdsXML):
         return re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
 
 
-class _ElementAttributes(fpdsElement, fpdsXMLMixin):
-    """
-    Utility class that helps parse out extra features of XML tags generated
-    by `xml.etree.ElementTree.Element`. This class should ideally not be
-    instantiated by users.
-
-    Attributes
-    ----------
-    element: `xml.etree.ElementTree.Element`
-        An XML element.
-    namespace_dict: `Dict[str, str]`
-        A namespace dictionary that allows module to parse FPDS elements.
-    prefix: `str`
-        Prefix to append to attribute dictionary. This will ensure that
-        duplicate tags like `PIID` are distinguished in the data.
-    """
-
-    def __init__(self, prefix: str, *args, **kwargs) -> None:
-        self.prefix = prefix
-        super().__init__(*args, **kwargs)
-
-    def __str__(self) -> str:  # pragma: no cover
-        return f"<_ElementAttributes {self.tag}>"
-
-    def _generate_nested_attribute_dict(self) -> Dict[str, str]:
-        """Returns all attributes of an Element.
-
-        Example
-        -------
-        <ns1:contractActionType description="BPA" part8OrPart13="PART8">E</ns1:contractActionType>
-
-        Extracting the text value from `contractActionType` would return "E".
-        Addtional metadata is stored as tag attributes which this method will
-        help parse out. This method will generate a dictionary including both
-        the text and tag attribute data. In this example, `contractActionType`
-        has two attributes: `description` and `part8OrPart13`. This method will
-        represent this tag the following way:
-
-            {
-                "{prefix}__contractActionType": "E",
-                "{prefix}__contractActionType__description": "BPA"
-                "{prefix}__contractActionType__part8OrPart13": "PART8"
-            }
-        """
-        assert isinstance(self.element, Element)
-
-        attributes = self.element.attrib
-        _attributes_copy = attributes.copy()
-
-        if self.element.text:
-            _attributes_copy[self.prefix] = self.element.text
-        for key in attributes:
-            nested_key = f"{self.prefix}__{key}"
-            _attributes_copy[nested_key] = attributes[key]
-            del _attributes_copy[key]
-
-        return _attributes_copy
-
-
 class Entry(fpdsElement):
     """New as of v1.2.0
 
