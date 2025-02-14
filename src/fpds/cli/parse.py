@@ -18,6 +18,29 @@ from fpds.config import FPDS_DATA_DATE_DIR
 from fpds.utilities import validate_kwarg
 
 
+def sanitize_param_value(value: str) -> str:
+    """
+    Sanitizes a parameter value for use in filenames.
+
+    If the value is in a date range format (e.g., "[2025/02/14,2025/02/14]"),
+    this function will remove the brackets, remove slashes, replace the comma
+    with a dash, and remove any whitespace.
+
+    For any other value, only alphanumeric characters and a few safe symbols
+    (dot, underscore, dash) are allowed.
+    """
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1]  # remove surrounding brackets
+        # Remove slashes and spaces, and replace comma with a dash.
+        inner = inner.replace("/", "")
+        inner = inner.replace(" ", "")
+        inner = inner.replace(",", "-")
+        return inner
+    else:
+        # Allow only alphanumeric characters and . _ -
+        return "".join(c for c in value if c.isalnum() or c in "._-")
+
+
 @click.command()
 @click.option("-o", "--output", required=False, help="Output directory")
 @click.argument("params", nargs=-1)
@@ -73,21 +96,21 @@ def parse(params, output):
 
     # Retrieve the FPDS data asynchronously.
     records = asyncio.run(request.data())
-    
-        # Create filename based on parameters.
-    filename = ""
-    for key, value in params_kwargs.items():
-        # Sanitize filename by removing special characters and spaces.
-        safe_value = "".join(c for c in value if c.isalnum() or c in "._-[]")
-        filename += f"{key}-{safe_value}_"  # Add underscore separator
 
-    filename = filename[:-1]  # Remove trailing underscore
-    if len(filename) > 200: # Limit filename length to avoid issues.
+    # Create filename based on parameters.
+    safe_parts = []
+    for key, value in params_kwargs.items():
+        safe_value = sanitize_param_value(value)
+        safe_parts.append(f"{key}-{safe_value}")
+    filename = "__".join(safe_parts)
+
+    # Limit filename length to avoid issues.
+    if len(filename) > 200:
         filename = filename[:200] + "_truncated"
     filename += ".json"
 
     data_file = output_path / filename
-    
+
     # Write the JSON output to file.
     with open(data_file, "w", encoding="utf-8") as outfile:
         json.dump(records, outfile, ensure_ascii=False, indent=2)
