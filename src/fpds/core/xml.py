@@ -6,8 +6,10 @@ last_updated: 07/13/2024
 """
 
 import re
-from typing import Dict, Iterator, List, Optional, Union, Any
-from xml.etree.ElementTree import Element, ElementTree, fromstring
+from typing import Dict, Iterator, List, Union, Any
+from io import BytesIO
+
+from lxml import etree
 
 from fpds.core import FPDS_ENTRY
 from fpds.core.mixins import fpdsMixin, fpdsXMLMixin
@@ -32,10 +34,10 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         If `content` is not of type `bytes` or an instance of `ElementTree`.
     """
 
-    def __init__(self, content: Union[bytes, ElementTree]) -> None:
+    def __init__(self, content: Union[bytes, etree._Element]) -> None:
         if isinstance(content, bytes):
             self.content = content
-            self.tree = self.convert_to_lxml_tree()
+            self.tree = etree.XML(content, parser=None)
         elif isinstance(content, self.xml_child_classes):
             self.tree = content
         else:
@@ -53,27 +55,23 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         this method in child classes since `getroot()` is not available for
         tags of type `Element`.
         """
-        if isinstance(self.tree, ElementTree):
-            root = self.tree.getroot()
-            query = root.find(".//ns0:title", self.namespace_dict)
-            assert isinstance(query, Element)
+        root = self.tree
+        query = root.find(".//{*}title", namespaces=None)
+        page = root.find(".//{*}link[@rel='alternate']", namespaces=None)
+        query_text = query.text if query is not None else ""
+        page_href = page.get("href") if page is not None else ""
+        return f"<fpdsXML query={query_text} page={page_href}>"
 
-            page = root.find(".ns0:link[@rel='alternate']", self.namespace_dict)
-            assert isinstance(page, Element)
-
-            return f"<fpdsXML query=`{query.text}` page=`{page.attrib['href']}`>"
-
-    def parse_items(self) -> Iterator[Element]:
+    def parse_items(self) -> Iterator[etree._Element]:
         """Returns iteration of `Element` as a generator."""
-        yield from self.tree.iter()
+        yield from self.tree.iter(tag=None)
 
-    def convert_to_lxml_tree(self) -> ElementTree:
+    def convert_to_lxml_tree(self) -> etree._Element:
         """Returns an `ElementTree` object from a `bytes` response."""
-        tree = ElementTree(fromstring(self.content))
-        return tree
+        return etree.XML(self.content, parser=None)
 
     @staticmethod
-    def _get_full_namespace(element: Element) -> str:
+    def _get_full_namespace(element: etree._Element) -> str:
         """For some odd reason, the `xml` API doesn't have a method to provide
         namespaces natively unless an XML file is saved locally. To avoid this,
         we just do some regex work.
@@ -109,17 +107,15 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
 
     @property
     def lower_limit(self) -> int:
-        """Lower limit of record count (i.e. if 40, it means there is a total of
-        40-49 records).
-        """
-        last_link = self.tree.find(".//ns0:link[@rel='last']", self.namespace_dict)
-        if isinstance(last_link, Element):
-            # length of last_link should always be 1
-            match = re.search(LAST_PAGE_REGEX, last_link.attrib["href"])
-            assert match is not None
-            record_count = int(match.group(1))
+        last_link = self.tree.find(".//{*}link[@rel='last']", namespaces=None)
+        if last_link is not None:
+            match = re.search(LAST_PAGE_REGEX, last_link.get("href", ""))
+            if match:
+                record_count = int(match.group(1))
+            else:
+                record_count = len(list(self.iter_entries()))
         else:
-            record_count = len(self.get_atom_feed_entries())
+            record_count = len(list(self.iter_entries()))
         return record_count
 
     def pagination_links(self, params: str) -> List[str]:
@@ -131,14 +127,36 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         page_range = list(range(0, self.lower_limit + offset, resp_size))
         return [f"{self.url_base}&q={params}&start={num}" for num in page_range]
 
-    def get_atom_feed_entries(self) -> List[Element]:
+    def iter_entries(self) -> Iterator[etree._Element]:
+        """
+        Streams through the XML content using iterparse.
+        Each <entry> element is yielded and then cleared to free memory.
+        """
+        with BytesIO(self.content) as f:
+            # Use recover=True to handle any slight XML malformations.
+            context = etree.iterparse(f, events=("end",), recover=True)
+            for event, elem in context:
+                if etree.QName(elem).localname == "entry":
+                    yield elem
+                    # Clear the element from memory.
+                    elem.clear()
+            del context
+
+    def get_atom_feed_entries(self) -> List[etree._Element]:
         """Returns tree entries that contain FPDS record data."""
-        return self.tree.findall(".//ns0:entry", self.namespace_dict)
+        return list(self.tree.findall(".//{*}entry", namespaces=None))
 
     def jsonify(self) -> List[FPDS_ENTRY]:
-        """Returns all paginated entries from an FPDS request."""
-        entries = self.get_atom_feed_entries()
-        return [Entry(content=entry)() for entry in entries]
+        """
+        Converts each <entry> element to a FPDS_ENTRY dictionary.
+        This uses streaming iterparse so that we don’t hold the entire
+        document in memory.
+        """
+        entries = []
+        for elem in self.iter_entries():
+            entry = Entry(content=elem)()
+            entries.append(entry)
+        return entries
 
 
 class fpdsElement(fpdsXML):
@@ -148,19 +166,15 @@ class fpdsElement(fpdsXML):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Ensure self.element is an Element (not an ElementTree)
-        if isinstance(self.tree, ElementTree):
-            self.element = self.tree.getroot()
-        else:
-            self.element = self.tree
+        # Ensure self.element is an lxml.etree._Element.
+        self.element = self.tree
         delattr(self, "tree")
 
     def __str__(self) -> str:  # pragma: no cover
         return f"<fpdsElement {self.tag}>"
 
-    def parse_items(self) -> Iterator[Element]:
-        """Returns iteration of `Element` as a generator."""
-        yield from self.element.iter()
+    def parse_items(self) -> Iterator[etree._Element]:
+        yield from self.element.iter(tag=None)
 
     @property
     def NAMESPACE_REGEX_PATTERN(self) -> str:
@@ -225,9 +239,9 @@ class Entry(fpdsElement):
         """Identifies the contract type for an individual award entry. Possible
         options include: `AWARD` or `IDV`.
         """
-        content = self.element.find(".//ns0:content", self.namespace_dict)
-        if content is not None and list(content):
-            award = list(content)[0]
+        content = self.element.find(".//{*}content", namespaces=None)
+        if content is not None and len(content):
+            award = content[0]
             award_type = re.sub(self.NAMESPACE_REGEX_PATTERN, "", award.tag)
             return award_type.upper()
         return ""
@@ -244,95 +258,3 @@ class Entry(fpdsElement):
         root_tag = next(iter(data))
         data[root_tag]["contract_type"] = self.contract_type
         return data
-
-    def content_tag_hierarchy(
-        self,
-        element: Optional[Element] = None,
-        parent: Optional[str] = None,
-        hierarchy: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, str]:
-        """Added on v1.2.0
-
-        For each FPDS request made, the `entry` tag represents an individual
-        award -- `AWARD` or `IDV`. The `content` tag contains a nested structure
-        of tags with all relevant award metadata. In v1.0.0, this parser assumed
-        each tag name to be unique, which caused duplicate tag names to be
-        overwritten. In the example below, we can see two groupings of tags --
-        `awardContractID` and `referencedIDVID` -- containing duplicate tag
-        names `agencyID`, `PIID`, and `modNumber`. Because the referenced IDV tag
-        succeeds the original award contract tag, only the referenced IDV data
-        tags would exist in the final JSON structure. To ensure that we capture
-        all data and correctly distinguish between an award PIID and referenced
-        IDV PIID, this function will recursively parse through each entry's
-        structure and generate a concatenated string of tag names.
-
-        <content xmlns:ns1="https://www.fpds.gov/FPDS" type="application/xml">
-            <ns1:awardID>
-                <ns1:awardContractID>
-                    <ns1:agencyID name="ENVIRONMENTAL PROTECTION AGENCY">6800</ns1:agencyID>
-                    <ns1:PIID>0002</ns1:PIID>
-                    <ns1:modNumber>P00018</ns1:modNumber>
-                    <ns1:transactionNumber>0</ns1:transactionNumber>
-                </ns1:awardContractID>
-                <ns1:referencedIDVID>
-                    <ns1:agencyID name="ENVIRONMENTAL PROTECTION AGENCY">6800</ns1:agencyID>
-                    <ns1:PIID>EPS31703</ns1:PIID>
-                    <ns1:modNumber>0</ns1:modNumber>
-                </ns1:referencedIDVID>
-            </ns1:awardID>
-        </content>
-
-        Parameters
-        ----------
-        element: `Optional[Element]`
-            Per docs, to get children simply iterate over element
-            https://lxml.de/api/lxml.etree._Element-class.html#getchildren.
-        parent: `Optional[str]`
-            Name of `elements` XML parent.
-        hierarchy: `Dict[str, str]`
-            The hierarchy dictionary structure to be passed through each
-            recursive function call.
-        """
-        if hierarchy is None:
-            hierarchy = {}
-
-        if element is None:
-            element = self.element  # type: ignore
-
-        _parent = Parent(content=element)
-        # continue parsing XML hierarchy because children exist and we want
-        # to get every possible bit of data
-        if _parent.children():
-            for child in _parent.children():
-                _child = Parent(content=child, parent_name=parent)
-                parent_tag_name = _child.parent_child_hierarchy_name()
-                hierarchy[parent_tag_name] = child
-
-                self.content_tag_hierarchy(
-                    element=child,
-                    parent=parent_tag_name,
-                    hierarchy=hierarchy,
-                )
-        return hierarchy
-
-
-class Parent(fpdsElement):
-    """Identifies an xml tag as a parent. In this package, a parent tag
-    is considered to have children elements.
-    """
-
-    def __init__(self, parent_name=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.parent_name = parent_name
-
-    def children(self):
-        """Returns children if they exist."""
-        if list(self.element):
-            return list(self.element)
-
-    def parent_child_hierarchy_name(self, delim="__"):
-        if self.parent_name:
-            name = self.parent_name + delim + self.clean_tag
-        else:
-            name = self.clean_tag
-        return name

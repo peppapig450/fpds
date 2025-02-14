@@ -6,9 +6,7 @@ last_updated: 08/21/2024
 """
 
 import asyncio
-import multiprocessing
 from asyncio import Semaphore
-from concurrent.futures import ProcessPoolExecutor
 from typing import List, Optional, Union
 from urllib import parse
 from urllib.request import urlopen
@@ -22,10 +20,11 @@ from fpds.core.xml import fpdsXML
 from fpds.errors import fpdsMaxPageLengthExceededError, fpdsMissingKeywordParameterError
 from fpds.utilities import validate_kwarg
 
+
 def process_pages(pages: list[fpdsXML]) -> list[FPDS_ENTRY]:
     """
     Helper function for parallel processing.
-    
+
     Given a list of fpdsXML pages, converts each page to a list of FPDS_ENTRYs
     using the fpdsRequest._jsonify static method and returns a single flattened list.
     """
@@ -33,6 +32,7 @@ def process_pages(pages: list[fpdsXML]) -> list[FPDS_ENTRY]:
     for page in pages:
         result.extend(fpdsRequest._jsonify(page))
     return result
+
 
 class fpdsRequest(fpdsMixin):
     """Makes a GET request to the FPDS ATOM feed. Takes an unlimited number of
@@ -196,16 +196,12 @@ class fpdsRequest(fpdsMixin):
 
     async def data(self) -> List[FPDS_ENTRY]:
         """
-        Retrieves FPDS data by fetching all pages and converting each to a
-        nested JSON-like dictionary. The conversion is offloaded to a process pool.
+        Retrieves FPDS data by fetching all pages and converting each to a JSON-like
+        dictionary. The conversion is done sequentially with streaming parsing to keep
+        memory usage low.
         """
         pages = await self.fetch()
-        num_processes = multiprocessing.cpu_count()
-        loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_processes) as pool:
-            # Offload the mapping to the process pool (blocking call wrapped in run_in_executor)
-            results: List[FPDS_ENTRY] = await loop.run_in_executor(
-                pool, process_pages, pages
-            )
-        # Flatten the list of lists into a single list of entries.
+        results: list[FPDS_ENTRY] = []
+        for page in pages:
+            results.extend(page.jsonify())
         return results
