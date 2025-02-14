@@ -6,7 +6,7 @@ last_updated: 07/13/2024
 """
 
 import re
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterator, List, Optional, Union, Any
 from xml.etree.ElementTree import Element, ElementTree, fromstring
 
 from fpds.core import FPDS_ENTRY
@@ -36,9 +36,9 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         if isinstance(content, bytes):
             self.content = content
             self.tree = self.convert_to_lxml_tree()
-        if isinstance(content, self.xml_child_classes):
+        elif isinstance(content, self.xml_child_classes):
             self.tree = content
-        if not isinstance(content, self.xml_child_classes + (bytes,)):
+        else:
             module_names = ",".join(
                 [f"`{mod}`" for mod in self.xml_child_classes_with_modules]
             )
@@ -99,14 +99,13 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
 
         https://docs.python.org/3/library/xml.etree.elementtree.html#parsing-xml-with-namespaces
         """
-        namespaces = list()
+        namespaces = []
         for element in self.parse_items():
-            _namespace = self._get_full_namespace(element)
-            if _namespace not in namespaces:
-                namespaces.append(_namespace)
+            ns = self._get_full_namespace(element)
+            if ns and ns not in namespaces:
+                namespaces.append(ns)
 
-        namespace_dict = {f"ns{idx}": ns for idx, ns in enumerate(namespaces)}
-        return namespace_dict
+        return {f"ns{idx}": ns for idx, ns in enumerate(namespaces)}
 
     @property
     def lower_limit(self) -> int:
@@ -130,22 +129,16 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         resp_size = self.response_size
         offset = 0 if self.lower_limit < 10 else resp_size
         page_range = list(range(0, self.lower_limit + offset, resp_size))
-        page_links = []
-        for num in page_range:
-            link = f"{self.url_base}&q={params}&start={num}"
-            page_links.append(link)
-        return page_links
+        return [f"{self.url_base}&q={params}&start={num}" for num in page_range]
 
     def get_atom_feed_entries(self) -> List[Element]:
         """Returns tree entries that contain FPDS record data."""
-        data_entries = self.tree.findall(".//ns0:entry", self.namespace_dict)
-        return data_entries
+        return self.tree.findall(".//ns0:entry", self.namespace_dict)
 
     def jsonify(self) -> List[FPDS_ENTRY]:
         """Returns all paginated entries from an FPDS request."""
         entries = self.get_atom_feed_entries()
-        json_data = [Entry(content=entry)() for entry in entries]
-        return json_data
+        return [Entry(content=entry)() for entry in entries]
 
 
 class fpdsElement(fpdsXML):
@@ -155,9 +148,11 @@ class fpdsElement(fpdsXML):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # per the `xml` API, an `ElementTree` and `Element` are different
-        # we ensure we follow that convention here by removing the `tree` attrib
-        self.element = self.tree
+        # Ensure self.element is an Element (not an ElementTree)
+        if isinstance(self.tree, ElementTree):
+            self.element = self.tree.getroot()
+        else:
+            self.element = self.tree
         delattr(self, "tree")
 
     def __str__(self) -> str:  # pragma: no cover
@@ -173,9 +168,7 @@ class fpdsElement(fpdsXML):
         namespaces from tags, irrespective of namespace value.
         """
         namespaces = "|".join(self.namespace_dict.values())
-        # yeah, f-strings don't do well with backslashes
-        PATTERN = r"\{(" + namespaces + r")\}"  # noqa
-        return PATTERN
+        return r"\{(" + namespaces + r")\}"
 
     @property
     def tag(self):
@@ -188,8 +181,7 @@ class fpdsElement(fpdsXML):
         `ns1:productOrServiceInformation` would simply return
         `productOrServiceInformation`.
         """
-        clean_tag = re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
-        return clean_tag
+        return re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
 
 
 class _ElementAttributes(fpdsElement, fpdsXMLMixin):
@@ -285,8 +277,7 @@ class Entry(fpdsElement):
 
     def __call__(self) -> FPDS_ENTRY:  # pragma: no cover
         """Shortcut for the finalized data structure."""
-        data_with_attributes = self.get_entry_data()
-        return data_with_attributes
+        return self.get_entry_data()
 
     @property
     def contract_type(self) -> str:
@@ -294,23 +285,24 @@ class Entry(fpdsElement):
         options include: `AWARD` or `IDV`.
         """
         content = self.element.find(".//ns0:content", self.namespace_dict)
-        if content:
+        if content is not None and list(content):
             award = list(content)[0]
             award_type = re.sub(self.NAMESPACE_REGEX_PATTERN, "", award.tag)
-        return award_type.upper()
+            return award_type.upper()
+        return ""
 
-    def get_entry_data(self) -> Dict[str, str]:
-        """Extracts award data from an entry."""
-        entry_tags = dict()
-        hierarchy = self.content_tag_hierarchy()
-
-        for prefix, tag in hierarchy.items():
-            attributes = _ElementAttributes(content=tag, prefix=prefix)
-            entry_tags.update(attributes._generate_nested_attribute_dict())
-            # the dumbest part of this data is it not natively having a column
-            # for the contract type
-            entry_tags["contract_type"] = self.contract_type
-        return entry_tags
+    def get_entry_data(self) -> Dict[str, Any]:
+        """
+        Extracts award data from an entry as a nested dictionary.
+        The structure preserves the original XML hierarchy.
+        An additional 'contract_type' field is injected.
+        """
+        # Convert the XML into a nested dictionary
+        data = self.to_nested_dict(self.element)
+        # data is a dict with a single key (typically 'entry'); add contract_type inside it.
+        root_tag = next(iter(data))
+        data[root_tag]["contract_type"] = self.contract_type
+        return data
 
     def content_tag_hierarchy(
         self,
