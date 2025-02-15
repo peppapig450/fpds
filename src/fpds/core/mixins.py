@@ -6,7 +6,7 @@ last_updated: 06/05/2024
 """
 
 import re
-from xml.etree.ElementTree import Element, ElementTree
+from lxml import etree
 from typing import Any
 
 
@@ -21,12 +21,12 @@ class fpdsXMLMixin:
     @property
     def xml_child_classes(self):
         """Classes from the `xml` API that inherit from `ElementTree` module"""
-        return (ElementTree, Element)
+        return (etree._Element,)
 
     @property
     def xml_child_classes_with_modules(self):
         """Fully qualified module name for classes in `xml_child_classes`"""
-        classes = (ElementTree, Element)
+        classes = self.xml_child_classes
         return [f"{cls.__module__}.{cls.__qualname__}" for cls in classes]
 
     @property
@@ -35,9 +35,9 @@ class fpdsXMLMixin:
         namespaces = "|".join(self.namespace_dict.values())  # type: ignore
         return r"\{(" + namespaces + r")\}"
 
-    def to_nested_dict(self, element: Element | None = None) -> dict:
+    def to_nested_dict(self, element: etree._Element | None = None) -> dict:
         """
-        Recursively converts an XML element into a nested dictionary that preserves the hierarchy.
+        Recursively converts an lxml element into a nested dictionary that preserves the hierarchy.
 
         Each element is converted to a dictionary with:
           - its tag name as the key (namespaces are stripped),
@@ -56,23 +56,20 @@ class fpdsXMLMixin:
         """
         if element is None:
             if hasattr(self, "element"):
-                element = self.element
+                element = self.element  # type: ignore
             elif hasattr(self, "tree"):
-                element = (
-                    self.tree.getroot()
-                    if isinstance(self.tree, ElementTree)
-                    else self.tree
-                )
+                # If self.tree has a getroot method, use it; otherwise, assume it's already an element.
+                element = self.tree.getroot() if hasattr(self.tree, "getroot") else self.tree  # type: ignore
             else:
                 raise ValueError("No XML element available for conversion.")
 
         pattern = re.compile(self.NAMESPACE_REGEX_PATTERN)
 
-        def recursive_dict(elem: Element) -> dict:
+        def recursive_dict(elem: etree._Element) -> dict:
             tag = pattern.sub("", elem.tag)
             node: dict[str, Any] = {}
             if elem.attrib:
-                node["@attributes"] = elem.attrib
+                node["@attributes"] = dict(elem.attrib)
             text = (elem.text or "").strip()
             if text:
                 node["#text"] = text
@@ -81,7 +78,7 @@ class fpdsXMLMixin:
                 child_nodes: dict[str, Any] = {}
                 for child in children:
                     child_dict = recursive_dict(child)
-                    # child_dict is a dict with one key: the child tag (without namespace)
+                    # Each child_dict is a dict with one key: the child's tag (without namespace)
                     for child_tag, child_value in child_dict.items():
                         if child_tag in child_nodes:
                             if isinstance(child_nodes[child_tag], list):
