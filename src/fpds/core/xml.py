@@ -1,111 +1,66 @@
 """
-Base classes for FPDS XML Processing
-
-This module provides an efficient implementation for processing FPDS (Federal Procurement 
-Data System) XML data using modern Python features and async processing.
+XML classes for parsing FPDS content.
 
 author: derek663@gmail.com
 last_updated: 02/14/2025
 """
-from typing_extensions import TypeAlias, override
 
-from collections.abc import Iterator
-from dataclasses import dataclass
-from enum import StrEnum, auto
-from functools import cached_property
 import re
-from typing import Final, Annotated, Any
+from typing import Dict, Iterator, List, Union, Any
 from io import BytesIO
 
 from lxml import etree
 
 from fpds.core import FPDS_ENTRY
-from fpds.core.mixins import fpdsMixin, fpdsXMLMixin, XMLElement
+from fpds.core.mixins import fpdsMixin, fpdsXMLMixin
 
-# Type aliases for clarity
-XMLContent: TypeAlias = bytes | XMLElement
-
-# Using Annotated for better type hints
-ValidXMLString = Annotated[str, "XML string with potential namespace"]
-
-# Constants with Final for immutability and clarity
-NAMESPACE_PATTERN: Final[str] = r"\{(.*)\}"
-LAST_PAGE_PATTERN: Final[str] = r"start=(.*?)$"
-DEFAULT_RESPONSE_SIZE: Final[int] = 10
-
-class EntryType(StrEnum):
-    """Enumeration for FPDS entry types"""
-    AWARD = auto()
-    IDV = auto()
-    UNKNOWN = auto()
-    
-@dataclass(frozen=True, slots=True)
-class EntryMetadata:
-    """Immutable container for entry metadata using slots for memory efficiency"""
-    contract_type: EntryType
-    title: str
-    modified_date: str
-    link: str
+NAMESPACE_REGEX = r"\{(.*)\}"
+LAST_PAGE_REGEX = r"start=(.*?)$"
 
 
 class fpdsXML(fpdsXMLMixin, fpdsMixin):
-    """
-    XML document parser for FPDS data
+    """Parses FPDS request content received as `bytes` or `ElementTree`.
+    This class represents an entire XML document.
+
+    Attributes
+    ----------
+    content: `Union[bytes, ElementTree]`
+        `bytes` content or an `ElementTree` type that can be parsed into
+        valid XML.
+
+    Raises
+    ------
+    TypeError:
+        If `content` is not of type `bytes` or an instance of `ElementTree`.
     """
 
-    def __init__(self, content: XMLContent) -> None:
-        """
-        Initialize the XML parser with either bytes or an ElementTree.
-        
-        Args:
-            content: Raw XML content as bytes or parsed ElementTree
-        
-        Raises:
-            TypeError: If content type is invalid
-        """
-        match content:
-            case bytes():
-                self.content = content
-                self.tree = etree.XML(content, parser=None)
-            case element if isinstance(content, XMLElement):
-                self.tree: XMLElement = element # type: ignore
-            case _:
-                module_names = ",".join(
-                    [f"`{mod}`" for mod in self.xml_child_classes_with_modules]
-                )
-                raise TypeError(
-                    f"Content must be bytes or one of: {module_names}"
-                )
+    def __init__(self, content: Union[bytes, etree._Element]) -> None:
+        if isinstance(content, bytes):
+            self.content = content
+            self.tree = etree.XML(content, parser=None)
+        elif isinstance(content, self.xml_child_classes):
+            self.tree = content
+        else:
+            module_names = ",".join(
+                [f"`{mod}`" for mod in self.xml_child_classes_with_modules]
+            )
+            raise TypeError(
+                f"You must provide bytes content or an instance of the "
+                f"following: {module_names}."
+            )
 
     def __str__(self) -> str:  # pragma: no cover
-        """Provide a descriptive string representation of the XML document"""
+        """The root represents the top of the XML tree from an instance of type
+        `ElementTree`. Since `fpdsElement` inherits from this class, we overwrite
+        this method in child classes since `getroot()` is not available for
+        tags of type `Element`.
+        """
         root = self.tree
         query = root.find(".//{*}title", namespaces=None)
         page = root.find(".//{*}link[@rel='alternate']", namespaces=None)
-        return (
-            f"<fpdsXML query={query.text if query is not None else ''} "
-            f"page={page.get('href', '') if page is not None else ''}>"
-        )
-        
-    @cached_property
-    def response_size(self) -> int:
-        """Cache the response size since it's constant per instance"""
-        return DEFAULT_RESPONSE_SIZE
-    
-    @cached_property
-    def lower_limit(self) -> int:
-        """
-        Calculate and cache the lower limit for pagination.
-        """
-        last_link = self.tree.find(".//{*}link[@rel='last']", namespaces=None)
-        match last_link:
-            case None:
-                return len(list(self.iter_entries()))
-            case link:
-                href = link.get("href", "")
-                if match := re.search(LAST_PAGE_PATTERN, href):
-                    return int(match.group(1))
-                return len(list(self.iter_entries()))
+        query_text = query.text if query is not None else ""
+        page_href = page.get("href") if page is not None else ""
+        return f"<fpdsXML query={query_text} page={page_href}>"
 
     def parse_items(self) -> Iterator[etree._Element]:
         """Returns iteration of `Element` as a generator."""
@@ -115,7 +70,55 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         """Returns an `ElementTree` object from a `bytes` response."""
         return etree.XML(self.content, parser=None)
 
-    def pagination_links(self, params: str) -> list[str]:
+    @staticmethod
+    def _get_full_namespace(element: etree._Element) -> str:
+        """For some odd reason, the `xml` API doesn't have a method to provide
+        namespaces natively unless an XML file is saved locally. To avoid this,
+        we just do some regex work.
+
+        Parameters
+        ----------
+        element: `Element`
+            An lxml Element type.
+        """
+        namespace = re.match(NAMESPACE_REGEX, element.tag)
+        return namespace.group(1) if namespace else ""
+
+    @property
+    def response_size(self) -> int:
+        """Max number of records in a single response."""
+        return 10
+
+    @property
+    def namespace_dict(self) -> Dict[str, str]:
+        """The better way of parsing tree elements with namespaces, per the docs.
+        Note that `namespaces` is a list, which retains parsing order of the
+        tree, which will be important in identifying Atom entries in `fpds`.
+
+        https://docs.python.org/3/library/xml.etree.elementtree.html#parsing-xml-with-namespaces
+        """
+        namespaces = []
+        for element in self.parse_items():
+            ns = self._get_full_namespace(element)
+            if ns and ns not in namespaces:
+                namespaces.append(ns)
+
+        return {f"ns{idx}": ns for idx, ns in enumerate(namespaces)}
+
+    @property
+    def lower_limit(self) -> int:
+        last_link = self.tree.find(".//{*}link[@rel='last']", namespaces=None)
+        if last_link is not None:
+            match = re.search(LAST_PAGE_REGEX, last_link.get("href", ""))
+            if match:
+                record_count = int(match.group(1))
+            else:
+                record_count = len(list(self.iter_entries()))
+        else:
+            record_count = len(list(self.iter_entries()))
+        return record_count
+
+    def pagination_links(self, params: str) -> List[str]:
         """Builds pagination links for a single API response based on the
         total record count value.
         """
@@ -129,50 +132,70 @@ class fpdsXML(fpdsXMLMixin, fpdsMixin):
         Streams through the XML content using iterparse.
         Each <entry> element is yielded and then cleared to free memory.
         """
-        with BytesIO(self.content) as xml_buffer:
-            for _, elem in etree.iterparse(
-                xml_buffer,
-                events=("end",),
-                tag="{*}entry",
-                recover=True
-            ):
+        with BytesIO(self.content) as f:
+            # Use recover=True to handle any slight XML malformations.
+            context = etree.iterparse(f, events=("end",), recover=True)
+            for event, elem in context:
+                if etree.QName(elem).localname == "entry":
                     yield elem
                     # Clear the element from memory.
                     elem.clear()
-                    # Also eliminate now-empty references from the root
-                    while elem.getprevious() is not None:
-                        del elem.getparent()[0]
+            del context
 
-    def jsonify(self) -> list[FPDS_ENTRY]:
+    def get_atom_feed_entries(self) -> List[etree._Element]:
+        """Returns tree entries that contain FPDS record data."""
+        return list(self.tree.findall(".//{*}entry", namespaces=None))
+
+    def jsonify(self) -> List[FPDS_ENTRY]:
         """
-        Convert XML entries to JSON-compatible dictionary format
+        Converts each <entry> element to a FPDS_ENTRY dictionary.
+        This uses streaming iterparse so that we don’t hold the entire
+        document in memory.
         """
-        return [Entry(content=elem)() for elem in self.iter_entries()]
+        entries = []
+        for elem in self.iter_entries():
+            entry = Entry(content=elem)()
+            entries.append(entry)
+        return entries
 
 
 class fpdsElement(fpdsXML):
-    """
-    Representation of a single FPDS XML element. This utility class helps us
+    """Representation of a single FPDS XML element. This utility class helps us
     retrieve the name of XML tags without the namespace.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Ensure self.element is an lxml.etree._Element.
-        self.element: XMLElement = self.tree
-        del self.tree
+        self.element = self.tree
+        delattr(self, "tree")
 
-    @override
     def __str__(self) -> str:  # pragma: no cover
-        return f"<fpdsElement {self.clean_tag}>"
+        return f"<fpdsElement {self.tag}>"
 
-    @cached_property
+    def parse_items(self) -> Iterator[etree._Element]:
+        yield from self.element.iter(tag=None)
+
+    @property
+    def NAMESPACE_REGEX_PATTERN(self) -> str:
+        """A single regex pattern string that allows us to remove all
+        namespaces from tags, irrespective of namespace value.
+        """
+        namespaces = "|".join(self.namespace_dict.values())
+        return r"\{(" + namespaces + r")\}"
+
+    @property
+    def tag(self):
+        """Raw tag from `xml` library."""
+        return self.element.tag
+
+    @property
     def clean_tag(self) -> str:
         """Tag name without the namespace. A tag like the following:
         `ns1:productOrServiceInformation` would simply return
         `productOrServiceInformation`.
         """
-        return re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.element.tag)
+        return re.sub(self.NAMESPACE_REGEX_PATTERN, "", self.tag)
 
 
 class Entry(fpdsElement):
@@ -200,56 +223,38 @@ class Entry(fpdsElement):
                         <ns1:agencyID name="PUBLIC BUILDINGS SERVICE">4740</ns1:agencyID>
     </entry>
     """
-    
-    @cached_property
-    def metadata(self) -> EntryMetadata:
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"<Entry {self.clean_tag}>"
+
+    def __call__(self) -> FPDS_ENTRY:  # pragma: no cover
+        """Shortcut for the finalized data structure."""
+        return self.get_entry_data()
+
+    @property
+    def contract_type(self) -> str:
+        """Identifies the contract type for an individual award entry. Possible
+        options include: `AWARD` or `IDV`.
         """
-        Cache entry metadata for repeated access.
-        Returns an immutable EntryMetadata object.
-        """
-        content_elem = self.element.find(".//{*}content", namespaces=None)
-        contract_type = EntryType.UNKNOWN
-        if content_elem is not None and len(content_elem):
-            award_tag = re.sub(
-                self.NAMESPACE_REGEX_PATTERN, 
-                "", 
-                content_elem[0].tag
-            ).upper()
-            try:
-                contract_type = EntryType[award_tag]
-            except KeyError:
-                contract_type = EntryType.UNKNOWN
-                
-        title_elem = self.element.find(".//{*}title", namespaces=None)
-        modified_elem = self.element.find(".//{*}modified", namespaces=None)
-        link_elem = self.element.find(
-            ".//{*}link[@rel='alternate']", 
-            namespaces=None
-        )
+        content = self.element.find(".//{*}content", namespaces=None)
+        if content is not None and len(content):
+            award = content[0]
+            award_type = re.sub(self.NAMESPACE_REGEX_PATTERN, "", award.tag)
+            return award_type.upper()
+        return ""
 
-        return EntryMetadata(
-            contract_type=contract_type,
-            title=title_elem.text if title_elem is not None else "",
-            modified_date=modified_elem.text if modified_elem is not None else "",
-            link=link_elem.get("href", "") if link_elem is not None else ""
-        )
-
-
-    def get_entry_data(self) -> dict[str, Any]:
+    def get_entry_data(self) -> Dict[str, Any]:
         """
         Extracts award data from an entry as a nested dictionary.
         The structure preserves the original XML hierarchy.
         An additional 'contract_type' field is injected.
         """
-        base_data = self.to_nested_dict(self.element)
-        root_tag = next(iter(base_data))
-           
-        return {
-            root_tag: base_data[root_tag] | {
-                "contract_type": self.metadata.contract_type.value
-            }
-        }
-        
-    def __call__(self) -> FPDS_ENTRY:
-        """Make the entry callable for convenient data extraction"""
-        return self.get_entry_data()
+        # Convert the XML into a nested dictionary
+        data = self.to_nested_dict(self.element)
+        # data is a dict with a single key (typically 'entry'); add contract_type inside it.
+        root_tag = next(iter(data))
+        data[root_tag]["contract_type"] = self.contract_type
+        return data
