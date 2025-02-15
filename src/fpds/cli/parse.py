@@ -3,7 +3,7 @@ Parsing command for retrieving FPDS federal
 contracts
 
 author: derek663@gmail.com
-last_updated: 12/30/2022
+last_updated: 02/14/2025
 """
 
 import asyncio

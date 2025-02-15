@@ -2,7 +2,7 @@
 XML classes for parsing FPDS content.
 
 author: derek663@gmail.com
-last_updated: 07/13/2024
+last_updated: 02/14/2025
 """
 
 import re

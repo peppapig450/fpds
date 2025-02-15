@@ -2,7 +2,7 @@
 Base classes for FPDS XML elements.
 
 author: derek663@gmail.com
-last_updated: 08/21/2024
+last_updated: 02/14/2025
 """
 
 import asyncio
