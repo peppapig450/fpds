@@ -42,8 +42,8 @@ class fpdsXMLMixin:
         Each element is converted to a dictionary with:
           - its tag name as the key (namespaces are stripped),
           - a sub-dictionary containing:
-              - attributes (stored under the key "@attributes"),
-              - text content (stored under the key "#text"), and
+              - attributes (stored under the key "attributes"),
+              - text content (stored under the key "text"), and
               - nested child elements.
 
         If no element is provided, the method attempts to use `self.element` (if set)
@@ -69,10 +69,10 @@ class fpdsXMLMixin:
             tag = pattern.sub("", elem.tag)
             node: dict[str, Any] = {}
             if elem.attrib:
-                node["@attributes"] = dict(elem.attrib)
+                node["attributes"] = dict(elem.attrib)
             text = (elem.text or "").strip()
             if text:
-                node["#text"] = text
+                node["text"] = text
             children = list(elem)
             if children:
                 child_nodes: dict[str, Any] = {}
